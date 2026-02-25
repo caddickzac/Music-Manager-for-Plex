@@ -220,7 +220,8 @@ def _artist_bucket(artist_name: str):
         artist_acc[k] = {
             "albums": set(), "years": set(), "track_count": 0,
             "artist_collections": set(), "bitrate_vals": [], "file_size_bytes_sum": 0,
-            "similar_artists": "", "popularity_vals": [], "total_plays": 0 
+            "similar_artists": "", "popularity_vals": [], "total_plays": 0,
+            "artist_genres": ""  # <--- Added Artist Genres to the bucket
         }
     return artist_acc[k]
 
@@ -241,6 +242,10 @@ with open(OUTPUT_CSV, "w", newline="", encoding="utf-8-sig") as f:
             artist_collections = _safe_join(getattr(artist, "collections", None))
 
             ab = _artist_bucket(artist_name)
+            
+            # <--- Update bucket with artist_genres
+            ab["artist_genres"] = artist_genres  
+            
             sims = getattr(artist, "similar", [])
             ab["similar_artists"] = ", ".join([s.tag if hasattr(s, "tag") else s.title for s in sims])
             for item in _split_csvish(artist_collections):
@@ -430,7 +435,11 @@ except: pass
 
 # Artist Summary
 ARTIST_INFO_CSV = os.path.join(out_dir, f"{_date_prefix} Artist_Level_Info.csv")
-artist_header = ["Artist", "Similar_Artists", "Total_Plays", "Median_Track_Popularity", "Albums", "Years", "Album_Count", "Track_Count", "Artist_Collections", "Bitrate_Avg", "Bitrate_Min", "Bitrate_Max", "File_Size_Total_MB"]
+artist_header = [
+    "Artist", "Similar_Artists", "Total_Plays", "Median_Track_Popularity", 
+    "Albums", "Years", "Album_Count", "Track_Count", "Artist_Collections", 
+    "Artist_Genres", "Bitrate_Avg", "Bitrate_Min", "Bitrate_Max", "File_Size_Total_MB"
+] # <--- Added "Artist_Genres" here
 artist_keys_sorted = sorted(artist_acc.keys(), key=lambda x: x.lower())
 
 with open(ARTIST_INFO_CSV, "w", newline="", encoding="utf-8-sig") as f:
@@ -442,10 +451,13 @@ with open(ARTIST_INFO_CSV, "w", newline="", encoding="utf-8-sig") as f:
         bitrates = [v for v in a["bitrate_vals"] if isinstance(v, (int, float))]
         years_int = sorted({y for y in a["years"] if isinstance(y, int)})
         size_mb = round(a["file_size_bytes_sum"] / (1024 * 1024), 1) if a["file_size_bytes_sum"] else 0
+        
+        # <--- Wrote a["artist_genres"] down here
         w.writerow([
             artist_name, a["similar_artists"], a["total_plays"], med_pop, ", ".join(sorted(a["albums"])),
             (f"{years_int[0]}-{years_int[-1]}" if years_int[0] != years_int[-1] else str(years_int[0])) if years_int else "",
             len(a["albums"]), int(a["track_count"]), _sorted_unique_join(a["artist_collections"]),
+            a["artist_genres"], 
             _avg(bitrates), min(bitrates) if bitrates else "", max(bitrates) if bitrates else "", size_mb,
         ])
 try: os.chmod(ARTIST_INFO_CSV, 0o777)
