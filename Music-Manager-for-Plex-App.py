@@ -23,7 +23,7 @@ except ImportError:
 from Scripts import plex_galaxy, artist_recommender  # Import from the subfolder
 
 # --- Version Configuration ---
-CURRENT_VERSION = "v2.1.3"
+CURRENT_VERSION = "v2.1.4"
 REPO_OWNER = "caddickzac"
 REPO_NAME = "Music-Manager-for-Plex"
 
@@ -290,6 +290,7 @@ def export_library_metadata_via_script(cfg: AppConfig, limit: int = 0, include_p
     env.update({
         "PLEX_BASEURL": cfg.plex_baseurl,
         "PLEX_TOKEN": cfg.plex_token,
+        "PLEX_LIBRARY": cfg.plex_library,
         "OUTPUT_CSV": out_path,
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",

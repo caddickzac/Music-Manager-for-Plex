@@ -23,6 +23,7 @@ except Exception:
 # --- Config from environment ---
 PLEX_BASEURL = os.environ.get("PLEX_BASEURL") or os.environ.get("PLEX_URL")
 PLEX_TOKEN   = os.environ.get("PLEX_TOKEN")   or os.environ.get("PLEX_API_TOKEN")
+PLEX_LIBRARY = os.environ.get("PLEX_LIBRARY") or "Music"
 
 # --- Export Limit ---
 limit_env = os.environ.get("EXPORT_LIMIT")
@@ -182,7 +183,14 @@ else:
 # ---------------------------------
 # Step 2: Extract full track metadata
 # ---------------------------------
-music_library = next((s for s in plex.library.sections() if getattr(s, "TYPE", "") == "artist"), None)
+try:
+    # Try to grab the exact library name specified by the user
+    music_library = plex.library.section(PLEX_LIBRARY)
+except Exception:
+    # Fallback to the original logic if they typed the name wrong
+    print(f"⚠️ Could not find library named '{PLEX_LIBRARY}'. Falling back to first audio library.", flush=True)
+    music_library = next((s for s in plex.library.sections() if getattr(s, "TYPE", "") == "artist"), None)
+
 artists = music_library.search()
 
 # 1. EDIT: Remove Gain, Loudness, Record_Label from Track Header
