@@ -23,7 +23,7 @@ except ImportError:
 from Scripts import plex_galaxy, artist_recommender  # Import from the subfolder
 
 # --- Version Configuration ---
-CURRENT_VERSION = "v2.1.4"
+CURRENT_VERSION = "v2.1.5"
 REPO_OWNER = "caddickzac"
 REPO_NAME = "Music-Manager-for-Plex"
 
@@ -1329,6 +1329,7 @@ def ui_playlist_creator_tab(cfg: AppConfig):
             else:
                 # Use the MASTER LIST to ensure we save everything
                 data = {k: st.session_state.get(k) for k in ALL_PRESET_KEYS}
+                data["pc_lib"] = cfg.plex_library                
                 save_preset_dict(name, data)
                 st.success(f"Saved preset: {name}")
 
