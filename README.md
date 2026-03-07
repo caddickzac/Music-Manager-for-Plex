@@ -26,6 +26,11 @@ A powerful **Streamlit** application running on Docker, locally on a PC, or Unra
 ![View 3](App%20Screenshots/View%203.png?raw=true)
 
 
+![View 4](App%20Screenshots/View%204.png?raw=true)
+
+
+![View 5](App%20Screenshots/View%205.png?raw=true)
+
 
 ## Table of Contents
 
