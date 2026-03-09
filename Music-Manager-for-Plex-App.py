@@ -23,7 +23,7 @@ except ImportError:
 from Scripts import plex_galaxy, artist_recommender  # Import from the subfolder
 
 # --- Version Configuration ---
-CURRENT_VERSION = "v2.1.6"
+CURRENT_VERSION = "v2.2.0"
 REPO_OWNER = "caddickzac"
 REPO_NAME = "Music-Manager-for-Plex"
 
@@ -57,9 +57,10 @@ INTERNAL_FILES = {
     "/app/Music_Manager_Track_Level_Data_Dictionary.csv": None
 }
 EXTERNAL_EXTRAS_PATH = "/app/Extras"
+EXAMPLES_DIR = os.path.join(EXTERNAL_EXTRAS_PATH, "Playlist Examples")
 
 # 2. Define folders that need recursive permission syncing
-FOLDERS_TO_UNLOCK = [EXPORTS_DIR, PRESETS_DIR, EXTERNAL_EXTRAS_PATH]
+FOLDERS_TO_UNLOCK = [EXPORTS_DIR, PRESETS_DIR, EXTERNAL_EXTRAS_PATH, EXAMPLES_DIR]
 
 def apply_unraid_permissions():
     """Forces 777 permissions recursively to prevent SMB/Unraid lockouts."""
@@ -105,8 +106,34 @@ def expose_internal_files():
             except Exception as e:
                 print(f"Error updating {filename}: {e}")
 
+def deploy_example_presets():
+    """
+    Copies bundled preset JSONs from /app/Playlist_Presets/ (inside the Docker image)
+    to the Extras/Playlist Examples folder (accessible via network share).
+    Always overwrites — these are app-managed examples, not user files.
+    """
+    internal_presets_dir = "/app/Playlist_Presets"
+    if not os.path.isdir(internal_presets_dir):
+        return
+    try:
+        os.makedirs(EXAMPLES_DIR, exist_ok=True)
+        os.chmod(EXAMPLES_DIR, 0o777)
+    except Exception:
+        return
+    for fn in os.listdir(internal_presets_dir):
+        if not fn.lower().endswith(".json"):
+            continue
+        src = os.path.join(internal_presets_dir, fn)
+        dst = os.path.join(EXAMPLES_DIR, fn)
+        try:
+            shutil.copy(src, dst)
+            os.chmod(dst, 0o777)
+        except Exception as e:
+            print(f"Warning: could not deploy example preset '{fn}': {e}")
+
 # Run setup logic before the UI loads
 expose_internal_files()
+deploy_example_presets()
 apply_unraid_permissions()
 
 # ---------------------------
@@ -408,6 +435,24 @@ def read_csv_forgiving(source) -> pd.DataFrame:
     # 3. Last resort fallback
     text = raw.decode("utf-8", errors="replace")
     return pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+
+
+# ---------------------------
+# Track Search Function Helpers
+# ---------------------------
+
+@st.cache_data(ttl=3600)
+def load_track_export_csv(filepath: str) -> pd.DataFrame:
+    return pd.read_csv(filepath, dtype={"Track_ID": str})
+
+
+def find_latest_track_csv(exports_dir: str):
+    if not os.path.exists(exports_dir):
+        return None
+    files = [f for f in os.listdir(exports_dir) if "Track_Level_Info" in f and f.endswith(".csv")]
+    if not files:
+        return None
+    return os.path.join(exports_dir, sorted(files, reverse=True)[0])
 
 # ---------------------------
 # Compare helpers
@@ -1109,21 +1154,39 @@ def ensure_presets_dir() -> None:
     except Exception:
         pass
 
+EXAMPLE_PREFIX = "📋 "
+
 def list_presets() -> List[str]:
     ensure_presets_dir()
+    names = []
+    # User presets
     try:
-        names = []
         for fn in os.listdir(PRESETS_DIR):
             if fn.lower().endswith(".json"):
                 names.append(os.path.splitext(fn)[0])
         names.sort()
-        return names
     except Exception:
-        return []
+        pass
+    # Example presets — shown with prefix, sorted separately at the bottom
+    try:
+        if os.path.isdir(EXAMPLES_DIR):
+            examples = []
+            for fn in os.listdir(EXAMPLES_DIR):
+                if fn.lower().endswith(".json"):
+                    examples.append(EXAMPLE_PREFIX + os.path.splitext(fn)[0])
+            names += sorted(examples)
+    except Exception:
+        pass
+    return names
 
 def load_preset_dict(name: str) -> dict:
     ensure_presets_dir()
-    path = os.path.join(PRESETS_DIR, f"{name}.json")
+    # Check if this is an example preset
+    if name.startswith(EXAMPLE_PREFIX):
+        bare = name[len(EXAMPLE_PREFIX):]
+        path = os.path.join(EXAMPLES_DIR, f"{bare}.json")
+    else:
+        path = os.path.join(PRESETS_DIR, f"{name}.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -1139,17 +1202,31 @@ def save_preset_dict(name: str, data: dict) -> None:
 def apply_preset_to_session(preset: dict) -> None:
     """
     Copy preset values into st.session_state for all known Playlist Creator keys.
+    Handles backwards compatibility with older preset formats.
     """
+    # --- Backwards compatibility: remap stale seed mode labels ---
+    SEED_MODE_LABEL_REMAP = {
+        "Auto (infer from seeds/history)": "Sonic Album Mix",
+        "Sonic Journey": "Sonic Journey (Linear Path)",
+    }
+    if "pc_seed_mode_label" in preset:
+        preset = dict(preset)  # don't mutate the original
+        preset["pc_seed_mode_label"] = SEED_MODE_LABEL_REMAP.get(
+            preset["pc_seed_mode_label"], preset["pc_seed_mode_label"]
+        )
+
     keys = [
         "pc_lib",
         "pc_custom_title",
-        "pc_preset_name", 
+        "pc_preset_name",
         "pc_exclude_days",
         "pc_lookback_days",
         "pc_max_tracks",
         "pc_sonic_limit",
+        "pc_deep_dive_target",
         "pc_hist_ratio",
         "pc_explore_exploit",
+        "pc_sonic_smoothing",
         "pc_use_periods",
         "pc_min_track",
         "pc_min_album",
@@ -1179,9 +1256,22 @@ def apply_preset_to_session(preset: dict) -> None:
         "pc_include_collections",
         "pc_exclude_collections",
     ]
+    # Preserve the user's existing library name — it's a per-server setting,
+    # not a per-playlist one. Only apply pc_lib from the preset if the user
+    # hasn't configured one yet.
+    existing_lib = st.session_state.get("pc_lib", "").strip()
+
+    # Clear track objects before applying — reconciliation loop will re-populate
+    # from the new pc_seed_tracks value on the next render
+    st.session_state["pc_seed_track_objects"] = []
+    st.session_state["pc_track_search_results"] = []
+
     for k in keys:
         if k in preset:
             st.session_state[k] = preset[k]
+
+    if existing_lib:
+        st.session_state["pc_lib"] = existing_lib
 
 # ---------------------------
 # Playlist Creator tab (with presets)
@@ -1263,35 +1353,59 @@ def ui_playlist_creator_tab(cfg: AppConfig):
                 apply_preset_to_session(preset)
 
     def handle_reset_inputs():
-        """Clears all playlist creator session keys, reverting widgets to defaults."""
-        
-        # List of text keys we want to FORCE to empty strings
-        text_keys = [
-            "pc_preset_name", 
-            "pc_custom_title",
-            "pc_lib",
-            "pc_seed_tracks", 
-            "pc_seed_artists", 
-            "pc_seed_playlists", 
-            "pc_seed_collections", 
-            "pc_seed_genres",
-            "pc_include_collections", 
-            "pc_exclude_collections", 
-            "pc_exclude_genres"
-        ]
-
-        for k in ALL_PRESET_KEYS:
-            if k in st.session_state:
-                if k in text_keys:
-                    # Force text inputs to empty string so the UI updates
-                    st.session_state[k] = ""
-                else:
-                    # For sliders/numbers, deleting the key lets the widget use its default value
-                    del st.session_state[k]
-        
-        # Reset the preset dropdown to "<none>"
-        if "pc_preset_select" in st.session_state:
-            st.session_state["pc_preset_select"] = "<none>"
+        """Clears all playlist creator session keys, reverting widgets to their defaults."""
+        defaults = {
+            # Text fields → empty
+            "pc_lib":                   "",
+            "pc_custom_title":          "",
+            "pc_preset_name":           "",
+            "pc_seed_tracks":           "",
+            "pc_seed_artists":          "",
+            "pc_seed_playlists":        "",
+            "pc_seed_collections":      "",
+            "pc_seed_genres":           "",
+            "pc_include_collections":   "",
+            "pc_exclude_collections":   "",
+            "pc_exclude_genres":        "",
+            "pc_track_search_query":    "",
+            # Numbers / sliders → widget defaults
+            "pc_exclude_days":          0,
+            "pc_lookback_days":         30,
+            "pc_max_tracks":            50,
+            "pc_sonic_limit":           20,
+            "pc_deep_dive_target":      15,
+            "pc_hist_ratio":            0.3,
+            "pc_explore_exploit":       0.7,
+            "pc_recency_bias":          0.0,
+            "pc_min_track":             7,
+            "pc_min_album":             0,
+            "pc_min_artist":            0,
+            "pc_min_play_count":        -1,
+            "pc_max_play_count":        -1,
+            "pc_min_year":              0,
+            "pc_max_year":              0,
+            "pc_min_duration":          0,
+            "pc_max_duration":          0,
+            "pc_max_artist":            6,
+            "pc_max_album":             0,
+            "pc_hist_min_rating":       0,
+            "pc_hist_max_play_count":   -1,
+            # Booleans → defaults
+            "pc_allow_unrated":         True,
+            "pc_sonic_smoothing":       False,
+            "pc_use_periods":           False,
+            "pc_genre_strict":          False,
+            # Selects → defaults
+            "pc_seed_mode_label":       "Sonic Album Mix",
+            "pc_seed_fallback_mode":    "history",
+            "pc_allow_off_genre":       0.2,
+            # Preset selector & track state
+            "pc_preset_select":         "<none>",
+            "pc_seed_track_objects":    [],
+            "pc_track_search_results":  [],
+        }
+        for k, v in defaults.items():
+            st.session_state[k] = v
 
     # --- LAYOUT ---
 
@@ -1347,7 +1461,7 @@ def ui_playlist_creator_tab(cfg: AppConfig):
         "Custom playlist title (optional)",
         value=st.session_state.get("pc_custom_title", ""),
         key="pc_custom_title",
-        placeholder="e.g., Sunday Psych, Classic Rock 1960–79, Morning Ambient",
+        placeholder="e.g., Indie Hits",
         help=(
             "If set, this will be used as the playlist title and printed onto the "
             "generated black cover art image."
@@ -1625,13 +1739,13 @@ def ui_playlist_creator_tab(cfg: AppConfig):
         genre_seeds_raw = st.text_input(
             "Genre seeds (comma-separated, track or album)",
             value=st.session_state.get("pc_seed_genres", ""),
-            placeholder="e.g., Rock, Psychedelic Rock, Jazz",
+            placeholder="e.g., Rock, Jazz, Ambient",
             key="pc_seed_genres",
         )
         include_collections_raw = st.text_input(
             "Include only collections (comma-separated)",
             value=st.session_state.get("pc_include_collections", ""),
-            placeholder="e.g., Classic Rock, Sunday Psych",
+            placeholder="e.g., Classic Rock, Jazz",
             key="pc_include_collections",
         )
     with gcol2:
@@ -1676,7 +1790,6 @@ def ui_playlist_creator_tab(cfg: AppConfig):
 
 
     seed_options = [
-        "Auto (infer from seeds/history)",
         "Deep Dive (Seed Albums)",
         "Genre seeds",
         "History + Seeds (Union)",
@@ -1696,7 +1809,6 @@ def ui_playlist_creator_tab(cfg: AppConfig):
         key="pc_seed_mode_label",
         help=(
             "How to build the core candidate set:\n"
-            "- Auto: Script infers mode based on provided seeds.\n"
             "- Deep Dive: Deep search into the discography of your seed albums/artists (Mini-Box Set).\n"
             "- Genre seeds: Songs matching the specific genres.\n"
             "- History + Seeds: Your recent history PLUS any specific seeds you add (Union).\n"
@@ -1710,7 +1822,6 @@ def ui_playlist_creator_tab(cfg: AppConfig):
     )
 
     seed_mode_map = {
-        "Auto (infer from seeds/history)": "",
         "Deep Dive (Seed Albums)": "album_echoes",
         "Genre seeds": "genre",
         "History + Seeds (Union)": "history",
@@ -1737,19 +1848,194 @@ def ui_playlist_creator_tab(cfg: AppConfig):
     col1, col2 = st.columns(2)
 
     with col1:
-        seed_track_keys_raw = st.text_input(
-            "Seed track ratingKeys (comma-separated)",
-            value=st.session_state.get("pc_seed_tracks", ""),
-            placeholder="e.g., 12345, 67890",
-            key="pc_seed_tracks",
-        )
+        # Seed artist names — moved above track search
         seed_artist_names_raw = st.text_input(
             "Seed artist names (comma-separated)",
             value=st.session_state.get("pc_seed_artists", ""),
             placeholder="e.g., Bill Evans, Miles Davis",
             key="pc_seed_artists",
         )
-        
+
+        st.markdown("**Seed Tracks**")
+
+        # Initialize session state
+        if "pc_seed_track_objects" not in st.session_state:
+            st.session_state["pc_seed_track_objects"] = []
+        if "pc_track_search_results" not in st.session_state:
+            st.session_state["pc_track_search_results"] = []
+
+        # Preset compatibility: add any keys from pc_seed_tracks not yet in objects
+        stored_raw = st.session_state.get("pc_seed_tracks", "")
+        stored_keys = [k.strip() for k in stored_raw.split(",") if k.strip()]
+        obj_keys = {t["key"] for t in st.session_state["pc_seed_track_objects"]}
+        for k in stored_keys:
+            if k not in obj_keys:
+                st.session_state["pc_seed_track_objects"].append({"key": k, "label": k, "short_label": k})
+
+        # Auto-resolve preset-loaded keys from CSV (no Plex call needed)
+        unresolved = [t for t in st.session_state["pc_seed_track_objects"] if t.get("short_label", t["key"]) == t["key"]]
+        if unresolved:
+            csv_path_resolve = find_latest_track_csv(EXPORTS_DIR)
+            if csv_path_resolve:
+                try:
+                    resolve_df = load_track_export_csv(csv_path_resolve)
+                    key_map = {str(row["Track_ID"]): row for _, row in resolve_df.iterrows()}
+                    for t in unresolved:
+                        if t["key"] in key_map:
+                            row = key_map[t["key"]]
+                            artist = str(row.get("Track_Artist", "Unknown")).strip()
+                            title = str(row.get("Title", "Unknown")).strip()
+                            album = str(row.get("Album", "Unknown")).strip()
+                            year = row.get("Date_Cleaned", "")
+                            year_str = f" ({int(year)})" if pd.notna(year) and year else ""
+                            rating = row.get("User_Rating", None)
+                            rating_str = f"Rating: {int(rating)}" if pd.notna(rating) and rating > 0 else "Unrated"
+                            t["label"] = f"{artist} — {album}{year_str} — {title} [{rating_str}]"
+                            t["short_label"] = f"{artist} - {title}"
+                except:
+                    pass
+
+        objs = st.session_state["pc_seed_track_objects"]
+
+        # Selected tracks — comma-separated compact display above search box
+        if objs:
+            short_labels = [t.get("short_label", t["key"]) for t in objs]
+            st.caption("Selected: " + ", ".join(short_labels))
+
+            def _handle_track_remove():
+                sel = st.session_state.get("pc_track_to_remove", "")
+                if sel and sel != "— remove a track —":
+                    idx = next(
+                        (i for i, t in enumerate(st.session_state["pc_seed_track_objects"])
+                         if t.get("short_label", t["key"]) == sel),
+                        None
+                    )
+                    if idx is not None:
+                        st.session_state["pc_seed_track_objects"].pop(idx)
+                        # Sync immediately so reconciliation loop doesn't re-add it on rerun
+                        st.session_state["pc_seed_tracks"] = ",".join(
+                            t["key"] for t in st.session_state["pc_seed_track_objects"]
+                        )
+                    st.session_state["pc_track_to_remove"] = "— remove a track —"
+
+            st.selectbox(
+                "Remove",
+                ["— remove a track —"] + short_labels,
+                key="pc_track_to_remove",
+                label_visibility="collapsed",
+                on_change=_handle_track_remove,
+            )
+
+        # Search row
+        s_col, btn_col = st.columns([4, 1])
+        with s_col:
+            track_search_query = st.text_input(
+                "Search tracks",
+                key="pc_track_search_query",
+                placeholder="Search by title, artist, or album...",
+                label_visibility="collapsed",
+            )
+        with btn_col:
+            search_btn = st.button("Search", key="pc_track_search_btn", use_container_width=True)
+
+        # Show which CSV is being used
+        csv_path_display = find_latest_track_csv(EXPORTS_DIR)
+        if csv_path_display:
+            st.caption(f"Searching: {os.path.basename(csv_path_display)}")
+        else:
+            st.caption("No export CSV found — will use Plex API")
+
+        found = []
+        if search_btn and track_search_query.strip():
+            query = track_search_query.strip()
+            q_tokens = query.lower().split()
+
+            csv_path = find_latest_track_csv(EXPORTS_DIR)
+
+            # --- PRIMARY: Search via local CSV export ---
+            if csv_path:
+                try:
+                    df = load_track_export_csv(csv_path)
+                    mask = pd.Series(True, index=df.index)
+                    for token in q_tokens:
+                        escaped = re.escape(token)
+                        token_mask = (
+                            df["Title"].str.lower().str.contains(escaped, na=False) |
+                            df["Track_Artist"].str.lower().str.contains(escaped, na=False) |
+                            df["Album"].str.lower().str.contains(escaped, na=False)
+                        )
+                        mask &= token_mask
+                    for _, row in df[mask].head(20).iterrows():
+                        year = row.get("Date_Cleaned", "")
+                        year_str = f" ({int(year)})" if pd.notna(year) and year else ""
+                        rating = row.get("User_Rating", None)
+                        rating_str = f"Rating: {int(rating)}" if pd.notna(rating) and rating > 0 else "Unrated"
+                        artist = str(row.get("Track_Artist", "Unknown")).strip()
+                        album = str(row.get("Album", "Unknown")).strip()
+                        title = str(row.get("Title", "Unknown")).strip()
+                        label = f"{artist} — {album}{year_str} — {title} [{rating_str}]"
+                        short_label = f"{artist} - {title}"
+                        found.append({"key": str(row["Track_ID"]), "label": label, "short_label": short_label})
+                except Exception as e:
+                    st.warning(f"CSV search failed: {e}")
+
+            # --- FALLBACK: Search via Plex API ---
+            else:
+                try:
+                    _plex = PlexServer(cfg.plex_baseurl, cfg.plex_token)
+                    _music = _plex.library.section(st.session_state.get("pc_lib", "Music"))
+                    _results = _music.search(title=q_tokens[0], libtype="track", limit=100)
+                    filtered = []
+                    for t in _results:
+                        fields = " ".join([
+                            (getattr(t, "title", "") or "").lower(),
+                            (getattr(t, "grandparentTitle", "") or "").lower(),
+                            (getattr(t, "parentTitle", "") or "").lower(),
+                        ])
+                        if all(re.search(re.escape(tok), fields) for tok in q_tokens):
+                            filtered.append(t)
+                        if len(filtered) >= 20:
+                            break
+                    for t in filtered:
+                        year = getattr(t, "parentYear", None)
+                        year_str = f" ({year})" if year else ""
+                        rating = getattr(t, "userRating", None)
+                        rating_str = f"Rating: {int(rating)}" if rating else "Unrated"
+                        artist = getattr(t, "grandparentTitle", "Unknown")
+                        album = getattr(t, "parentTitle", "Unknown")
+                        label = f"{artist} — {album}{year_str} — {t.title} [{rating_str}]"
+                        short_label = f"{artist} - {t.title}"
+                        found.append({"key": str(t.ratingKey), "label": label, "short_label": short_label})
+                except Exception as e:
+                    st.warning(f"Track search failed: {e}")
+
+            if found:
+                st.session_state["pc_track_search_results"] = found
+            else:
+                st.session_state["pc_track_search_results"] = []
+                st.warning("No tracks found. Try a different search term.")
+
+        # Show search results in a scrollable container
+        search_results = st.session_state.get("pc_track_search_results", [])
+        if search_results:
+            st.caption("Results — click to add:")
+            already_selected = {t["key"] for t in st.session_state["pc_seed_track_objects"]}
+            with st.container(height=280):
+                for r in search_results:
+                    is_added = r["key"] in already_selected
+                    btn_label = f"✓ {r['label']}" if is_added else r["label"]
+                    if st.button(btn_label, key=f"pc_add_{r['key']}", disabled=is_added, use_container_width=True):
+                        st.session_state["pc_seed_track_objects"].append({
+                            "key": r["key"],
+                            "label": r["label"],
+                            "short_label": r["short_label"],
+                        })
+                        st.rerun()
+
+        # Sync to pc_seed_tracks for payload and preset saving
+        st.session_state["pc_seed_tracks"] = ",".join(t["key"] for t in st.session_state["pc_seed_track_objects"])
+        seed_track_keys_raw = st.session_state["pc_seed_tracks"]
+
     with col2:
         seed_collection_names_raw = st.text_input(
             "Seed collection names (comma-separated)",

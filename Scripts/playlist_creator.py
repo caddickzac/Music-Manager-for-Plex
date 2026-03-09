@@ -567,43 +567,6 @@ def pick_track_from_album(
         idx = int(random.random() ** 2 * (len(ordered) - 1))
         return ordered[idx]
 
-def pick_track_from_artist(
-    artist: Artist,
-    plex: PlexServer,
-    exploit_weight: float,
-    min_track: int,
-    min_album: int,
-    min_artist: int,
-    allow_unrated: bool,
-    exclude_keys: Set[str],
-    min_play_count: Optional[int],
-    max_play_count: Optional[int],
-    min_year: Optional[int],
-    max_year: Optional[int],
-    min_duration_sec: Optional[int],
-    max_duration_sec: Optional[int],
-    include_collections: Set[str],
-    exclude_collections: Set[str],
-    exclude_genres: Set[str],
-) -> Optional[Track]:
-    try:
-        albums = artist.albums()
-    except: return None
-    
-    if not albums: return None
-    random.shuffle(albums)
-
-    for album in albums:
-        t = pick_track_from_album(
-            album, plex, exploit_weight,
-            min_track, min_album, min_artist, allow_unrated,
-            exclude_keys, min_play_count, max_play_count,
-            min_year, max_year, min_duration_sec, max_duration_sec,
-            include_collections, exclude_collections, exclude_genres
-        )
-        if t: return t
-    return None
-
 # ---------------------------------------------------------------------------
 # EXPANSION STRATEGIES
 # ---------------------------------------------------------------------------
@@ -636,8 +599,9 @@ def expand_via_sonic_albums(seed_tracks, plex, sonic_limit, exclude_keys, filter
 
     # 3. EXTRACT NEW VARIABLES
     exploit_weight = float(kwargs.get('exploit_weight', 0.5))
-    recency_bias = float(kwargs.get('recency_bias', 0.0))  # <--- NEW
-    
+    recency_bias = float(kwargs.get('recency_bias', 0.0))
+    target_count = int(kwargs.get('target_count', 50))
+
     for album in expanded_albums:
         try:
             tracks = album.tracks()
@@ -649,14 +613,16 @@ def expand_via_sonic_albums(seed_tracks, plex, sonic_limit, exclude_keys, filter
                 use_popularity=True
             )
 
+            # Dynamic cap: spread target_count evenly across all expanded albums, min 3
+            tracks_per_album = max(3, -(-target_count // max(1, len(expanded_albums))))
             count = 0
             for t in tracks:
                 if track_passes_static_filters(t, plex, set(), exclude_keys, **filter_criteria, reject_reasons=dummy_rejects):
                     results.append(t)
                     count += 1
-                if count >= 6: break
+                if count >= tracks_per_album: break
         except: continue
-        
+
     return results
 
 def expand_via_sonic_artists(seed_artists, plex, sonic_limit, exclude_keys, filter_criteria, **kwargs):
@@ -677,8 +643,9 @@ def expand_via_sonic_artists(seed_artists, plex, sonic_limit, exclude_keys, filt
 
     # 2. EXTRACT NEW VARIABLES
     exploit_weight = float(kwargs.get('exploit_weight', 0.5))
-    recency_bias = float(kwargs.get('recency_bias', 0.0)) # <--- NEW
-    
+    recency_bias = float(kwargs.get('recency_bias', 0.0))
+    target_count = int(kwargs.get('target_count', 50))
+
     # 3. Harvest Tracks
     for artist in artists:
         try:
@@ -686,16 +653,18 @@ def expand_via_sonic_artists(seed_artists, plex, sonic_limit, exclude_keys, filt
             tracks = artist.tracks()
 
             tracks = smart_sort_candidates(
-                tracks, exploit_weight, 
-                recency_bias=recency_bias, # <--- PASSED HERE
+                tracks, exploit_weight,
+                recency_bias=recency_bias,
                 use_popularity=True
             )
 
+            # Dynamic cap: spread target_count evenly across all artists, min 5
+            tracks_per_artist = max(5, -(-target_count // max(1, len(artists))))
             for track in tracks:
                 if track_passes_static_filters(track, plex, set(), exclude_keys, **filter_criteria, reject_reasons=dummy_rejects):
                     results.append(track)
                     valid += 1
-                if valid >= 25: break
+                if valid >= tracks_per_artist: break
         except: continue
         
     return results
@@ -727,13 +696,15 @@ def expand_via_sonic_tracks(seed_tracks, plex, sonic_limit, exclude_keys, filter
             if rk:
                 endpoint = f"/library/metadata/{rk}/nearest?context=sonicallySimilar&limit={sonic_limit}"
                 sims = list(seed.fetchItems(endpoint))
-        except: pass
+        except Exception as e:
+            log_detail(f"Sonic nearest endpoint failed for '{seed.title}': {e}")
 
         if not sims:
             try:
                 related = seed.getRelated(hub='sonic', count=sonic_limit)
                 sims = [t for t in related if isinstance(t, Track)]
-            except: pass
+            except Exception as e:
+                log_detail(f"Sonic getRelated fallback failed for '{seed.title}': {e}")
 
         # 2. APPLY SMART SORT (Preserve Sonic Order as Base)
         sims = smart_sort_candidates(
@@ -804,8 +775,9 @@ def expand_album_echoes(seed_tracks, plex, exclude_keys, filter_criteria, **kwar
             
             if unplayed or played:
                 album_pools[album.ratingKey] = unplayed + played
-            
-        except: pass
+
+        except Exception as e:
+            log_detail(f"Skipping album '{getattr(album, 'title', album)}' during expansion: {e}")
 
     results = []
     active_keys = [a.ratingKey for a in albums if a.ratingKey in album_pools]
@@ -894,25 +866,26 @@ def find_sonic_path(start_track: Track, end_track: Track, plex: PlexServer, max_
     # Path not found
     return None
 
-def inflate_path(path: List[Track], target_count: int, plex: PlexServer) -> List[Track]:
+def inflate_path(path: List[Track], target_count: int, plex: PlexServer, global_seen: set = None) -> List[Track]:
     """
     Takes a skeletal path and 'fattens' it with neighbors to reach target_count.
+    global_seen is mutated in place to track filler keys across multiple legs.
     """
-    if len(path) >= target_count: 
+    if len(path) >= target_count:
         return path
-    
-    # Calculate how many neighbors we need per track in the path
+
     needed = target_count - len(path)
-    # Add a buffer (+2) to ensure we hit the target despite duplicates
     per_node = int(needed / len(path)) + 2
-    
+
     inflated = []
+    # seen = path waypoints + anything already used globally
     seen = {t.ratingKey for t in path}
-    
+    if global_seen:
+        seen |= global_seen
+
     for track in path:
         inflated.append(track)
-        
-        # Flesh out this waypoint with neighbors
+
         try:
             neighbors = get_sonic_similar_tracks(track, limit=per_node + 5)
             count = 0
@@ -920,176 +893,164 @@ def inflate_path(path: List[Track], target_count: int, plex: PlexServer) -> List
                 if n.ratingKey not in seen:
                     inflated.append(n)
                     seen.add(n.ratingKey)
+                    if global_seen is not None:
+                        global_seen.add(n.ratingKey)
                     count += 1
-                if count >= per_node: 
+                if count >= per_node:
                     break
-        except: pass
-        
+        except Exception as e:
+            log_detail(f"inflate_path: sonic fetch failed for '{track.title}': {e}")
+
     return inflated
 
 def expand_sonic_journey(seed_tracks, plex, target_count: int = 50, **kwargs) -> List[Track]:
     """
-    Connects seeds with a path, then inflates that path to meet target_count.
+    Connects seeds with a sonic path, inflates to target_count, and guarantees:
+    - No duplicate filler tracks across legs
+    - The last seed track is the final element of the playlist
     """
     if len(seed_tracks) < 2:
         return seed_tracks
 
-    # Divide the target count by the number of "legs" in the journey
-    # e.g. 50 tracks, 2 seeds (1 leg) -> target 50 for the A->B trip
     legs = len(seed_tracks) - 1
     per_leg_target = max(5, int(target_count / legs))
 
+    # Pre-populate global_seen with all seed keys so they never appear as filler
+    seed_keys = {t.ratingKey for t in seed_tracks}
+    global_seen: set = set(seed_keys)
+
     full_journey = []
-    
+
     for i in range(legs):
         start = seed_tracks[i]
         end = seed_tracks[i+1]
-        
+
         # 1. Try Pathfinding
         path = find_sonic_path(start, end, plex, max_depth=4, width=15)
-        
+
         segment = []
         if path:
-            # Path found! Check if it's long enough.
             if len(path) < per_leg_target:
                 log_detail(f"Path found ({len(path)} tracks). Inflating to ~{per_leg_target}...")
-                segment = inflate_path(path, per_leg_target, plex)
+                segment = inflate_path(path, per_leg_target, plex, global_seen=global_seen)
             else:
                 segment = path
         else:
-            # 2. Fallback Bridge (Inflated by default)
+            # Fallback Bridge
             log_warning(f"⚠️ No path {start.title}->{end.title}. Bridging {per_leg_target} tracks.")
-            
-            # Grab half from A, half from B
             half = int(per_leg_target / 2) + 2
-            bridge_a = get_sonic_similar_tracks(start, limit=half)
-            bridge_b = get_sonic_similar_tracks(end, limit=half)
-            
+            bridge_a = [t for t in get_sonic_similar_tracks(start, limit=half + 10) if t.ratingKey not in global_seen][:half]
+            bridge_b = [t for t in get_sonic_similar_tracks(end, limit=half + 10) if t.ratingKey not in global_seen][:half]
+            for t in bridge_a + bridge_b:
+                global_seen.add(t.ratingKey)
             segment = [start] + bridge_a + bridge_b + [end]
 
-        # 3. Stitch it together
+        # Stitch legs together, skipping duplicate transition point
         if full_journey:
-            # If the last track of journey is the same as first of segment, skip first of segment
             if full_journey[-1].ratingKey == segment[0].ratingKey:
                 full_journey.extend(segment[1:])
             else:
                 full_journey.extend(segment)
         else:
             full_journey.extend(segment)
-            
+
+    # Guarantee the last seed is the final track.
+    # inflate_path may have added filler after the final waypoint — move last seed to the end.
+    last_seed = seed_tracks[-1]
+    if full_journey and full_journey[-1].ratingKey != last_seed.ratingKey:
+        full_journey = [t for t in full_journey if t.ratingKey != last_seed.ratingKey]
+        full_journey = full_journey[:target_count - 1]
+        full_journey.append(last_seed)
+
     return full_journey
 
 def smooth_playlist_gradient(tracks: List[Track], plex: PlexServer) -> List[Track]:
-    """
-    UPGRADED SONIC SMOOTHING (The "Smart Mix"):
-    1. SCOUT: Checks the top 10 tracks to see which one creates the best starting link.
-    2. CHAIN: Plays that track, then finds the best sonic/BPM match from the remaining pool.
-    3. SEPARATION: Actively prevents the same artist from playing back-to-back.
-    """
     if not tracks: return []
     if len(tracks) < 3: return tracks
 
     log_status(70, "Smoothing playlist gradient (Smart Sonic Sort)...")
-    
-    # We work with a copy so we don't break the original list if we abort
+
     pool = tracks.copy()
-    
-    # --- PHASE 1: THE SCOUT (Find the best starting point) ---
-    # Instead of blindly picking #1, we check the top 10 to see who connects best.
-    
-    scout_candidates = pool[:10] 
-    best_start_track = pool[0] 
+    pool_index: Dict[int, Track] = {t.ratingKey: t for t in pool}
+    neighbor_cache: Dict[int, List[int]] = {}  # populated lazily on first access
+
+    def get_cached_neighbors(t: Track) -> List[int]:
+        if t.ratingKey not in neighbor_cache:
+                try:
+                        neighbors = get_sonic_similar_tracks(t, limit=50)
+                        neighbor_cache[t.ratingKey] = [n.ratingKey for n in neighbors]
+                except:
+                        neighbor_cache[t.ratingKey] = []
+        return neighbor_cache[t.ratingKey]
+
+    def forward_score(t: Track) -> int:
+            return sum(1 for nk in neighbor_cache.get(t.ratingKey, []) if nk in pool_index)
+
+    def remove_from_pool(t: Track) -> None:
+            pool.remove(t)
+            pool_index.pop(t.ratingKey, None)
+
+    # --- PHASE 1: SCOUT (Find best starting point) ---
+    scout_size = min(20, len(pool))
+    best_start_track = pool[0]
     best_link_score = 9999
-    
-    # We define a helper to get neighbors safely using the existing script function
-    def get_neighbors(t, limit=20):
-        return get_sonic_similar_tracks(t, limit)
 
-    log_detail(f"Scouting best start from top {len(scout_candidates)} tracks...")
+    log_detail(f"Scouting best start from top {scout_size} tracks...")
 
-    for cand in scout_candidates:
-        try:
-            # who sounds like this candidate?
-            sims = get_neighbors(cand, limit=20) 
-            
-            # Check if any of these similar tracks are in our pool (and diff artist)
-            for rank, s in enumerate(sims):
-                # Check if 's' is in our pool and satisfies artist separation
-                # We prioritize tighter matches (lower rank)
-                for p in pool:
-                    if p.ratingKey == s.ratingKey and p.grandparentTitle != cand.grandparentTitle:
+    for cand in pool[:scout_size]:
+        for rank, nk in enumerate(get_cached_neighbors(cand)):  # fetches + caches here
+                if nk in pool_index and pool_index[nk].grandparentTitle != cand.grandparentTitle:
                         if rank < best_link_score:
-                            best_link_score = rank
-                            best_start_track = cand
-                        break 
-                if best_link_score == 0: break # Can't beat perfect
-        except: pass
+                                best_link_score = rank
+                                best_start_track = cand
+                        break
+        if best_link_score == 0:
+                break
 
-    # Start the playlist with the winner
-    if best_start_track in pool:
-        pool.remove(best_start_track)
-        playlist = [best_start_track]
-        if best_link_score < 9999:
-            log_detail(f"Selected Start: '{best_start_track.title}' (Link Rank: {best_link_score})")
-    else:
-        playlist = [pool.pop(0)]
+    remove_from_pool(best_start_track)
+    playlist = [best_start_track]
+    if best_link_score < 9999:
+        log_detail(f"Selected Start: '{best_start_track.title}' (Link Rank: {best_link_score})")
 
-    # --- PHASE 2: THE CHAIN (Weave the rest) ---
+    # --- PHASE 2: CHAIN (1-step look-ahead greedy, lazy API calls) ---
     while pool:
         current_track = playlist[-1]
+        current_artist = current_track.grandparentTitle
         best_candidate = None
-        best_index = -1
-        
-        # Priority 1: Sonic Match
-        try:
-            sims = get_neighbors(current_track, limit=50)
-            
-            # Look for the first match that is IN our pool AND distinct artist
-            for s in sims:
-                for i, p in enumerate(pool):
-                    if p.ratingKey == s.ratingKey:
-                        # Artist Constraint
-                        if p.grandparentTitle != current_track.grandparentTitle:
-                            best_candidate = p
-                            best_index = i
-                            break
-                if best_candidate: break
-        except: pass
 
-        # Priority 2: BPM Match (Fallback)
-        # If no sonic match, find a track with similar energy
-        if not best_candidate and hasattr(current_track, 'bpm') and current_track.bpm:
-            current_bpm = current_track.bpm
-            closest_diff = 1000
-            
-            for i, p in enumerate(pool):
-                # Skip same artist
-                if p.grandparentTitle == current_track.grandparentTitle: continue
-                
-                if hasattr(p, 'bpm') and p.bpm:
-                    diff = abs(p.bpm - current_bpm)
-                    # Only link if it's actually close (within 8 BPM)
-                    if diff < closest_diff and diff < 8:
-                        closest_diff = diff
-                        best_candidate = p
-                        best_index = i
+        # Priority 1: Sonic match — pick the one with the best forward connectivity.
+        # get_cached_neighbors triggers one API call for current_track if not yet cached.
+        # forward_score reads cache only — no new API calls.
+        sonic_matches = [
+                pool_index[nk]
+                for nk in get_cached_neighbors(current_track)
+                if nk in pool_index and pool_index[nk].grandparentTitle != current_artist
+        ]
+        if sonic_matches:
+                best_candidate = max(sonic_matches, key=forward_score)
 
-        # Priority 3: Any Different Artist (Final Fallback)
+        # Priority 2: BPM match (different artist, within 8 BPM)
+        if not best_candidate and getattr(current_track, 'bpm', None):
+                current_bpm = current_track.bpm
+                closest_diff = 1000
+                for t in pool:
+                        if t.grandparentTitle == current_artist: continue
+                        if getattr(t, 'bpm', None):
+                                diff = abs(t.bpm - current_bpm)
+                                if diff < closest_diff and diff < 8:
+                                        closest_diff = diff
+                                        best_candidate = t
+
+        # Priority 3: Any different artist
         if not best_candidate:
-            for i, p in enumerate(pool):
-                if p.grandparentTitle != current_track.grandparentTitle:
-                    best_candidate = p
-                    best_index = i
-                    break
-        
-        # Priority 4: Emergency (Just take the next one, even if same artist)
-        if not best_candidate:
-            best_candidate = pool[0]
-            best_index = 0
+                best_candidate = next((t for t in pool if t.grandparentTitle != current_artist), None)
 
-        # Move track from Pool to Playlist
+        # Priority 4: Emergency — just take the next one
+        if not best_candidate:
+                best_candidate = pool[0]
+
+        remove_from_pool(best_candidate)
         playlist.append(best_candidate)
-        pool.pop(best_index)
 
     return playlist
 
@@ -1247,7 +1208,6 @@ def collect_seed_tracks_from_collections(music, names):
 
 def convert_preset_to_payload(flat_cfg: dict) -> dict:
     seed_mode_map = {
-        "Auto (infer from seeds/history)": "",
         "Deep Dive (Seed Albums)": "album_echoes",
         "History + Seeds (Union)": "history",
         "Genre seeds": "genre",
@@ -1256,6 +1216,7 @@ def convert_preset_to_payload(flat_cfg: dict) -> dict:
         "Sonic Tracks Mix": "track_sonic",
         "Sonic Combo (Albums + Artists)": "sonic_combo",
         "Sonic History (Intersection)": "sonic_history",
+        "Sonic Journey": "sonic_journey",
         "Strict Collection": "strict_collection",
     }
     
@@ -1397,8 +1358,8 @@ def main() -> int:
         "min_album": int(pl_cfg.get("min_rating", {}).get("album", 0)),
         "min_artist": int(pl_cfg.get("min_rating", {}).get("artist", 0)),
         "allow_unrated": bool(pl_cfg.get("allow_unrated", True)),
-        "min_play_count": int(pl_cfg.get("min_play_count", -1) or -1) if pl_cfg.get("min_play_count")!=-1 else None,
-        "max_play_count": int(pl_cfg.get("max_play_count", -1) or -1) if pl_cfg.get("max_play_count")!=-1 else None,
+        "min_play_count": None if pl_cfg.get("min_play_count", -1) == -1 else int(pl_cfg.get("min_play_count")),
+        "max_play_count": None if pl_cfg.get("max_play_count", -1) == -1 else int(pl_cfg.get("max_play_count")),
         "min_year": int(pl_cfg.get("min_year", 0)),
         "max_year": int(pl_cfg.get("max_year", 0)),
         "min_duration_sec": int(pl_cfg.get("min_duration_sec", 0)),
@@ -1471,11 +1432,16 @@ def main() -> int:
                 current_album = all_albums[album_idx % len(all_albums)]
                 album_idx += 1
                 t = pick_track_from_album(
-                    current_album, plex, exploit_weight, 
-                    filter_criteria["min_track"], filter_criteria["min_album"], filter_criteria["min_artist"], 
-                    filter_criteria["allow_unrated"], 
-                    seen_seed_keys, 
-                    None, None, 0, 0, 0, 0, set(), set(), set()
+                    current_album, plex, exploit_weight,
+                    filter_criteria["min_track"], filter_criteria["min_album"], filter_criteria["min_artist"],
+                    filter_criteria["allow_unrated"],
+                    seen_seed_keys,
+                    filter_criteria.get("min_play_count"), filter_criteria.get("max_play_count"),
+                    filter_criteria.get("min_year", 0), filter_criteria.get("max_year", 0),
+                    filter_criteria.get("min_duration_sec", 0), filter_criteria.get("max_duration_sec", 0),
+                    filter_criteria.get("include_collections", set()),
+                    filter_criteria.get("exclude_collections", set()),
+                    filter_criteria.get("exclude_genres", set()),
                 )
                 if t and t.ratingKey not in seen_seed_keys:
                     seed_tracks.append(t)
@@ -1492,28 +1458,28 @@ def main() -> int:
         except Exception as e:
             log_warning(f"Error picking seeds for {artist.title}: {e}")
 
-    # SMART GENRE SEEDS (UPDATED CALL)
+    # SMART GENRE SEEDS
     g_seeds = [str(g).strip() for g in pl_cfg.get("genre_seeds", []) if str(g).strip()]
-    if g_seeds:
-        # Pass exclude_keys and filter_criteria
+    g_tracks = None  # collected lazily — only once, reused by fallback if needed
+
+    if g_seeds and seed_mode == "genre":
         g_tracks = collect_genre_tracks(music, plex, g_seeds, excluded_keys, filter_criteria)
-        if seed_mode == "genre": 
-            seed_tracks.extend(g_tracks)
+        seed_tracks.extend(g_tracks)
 
     if seed_mode == "history": seed_tracks.extend(h_seeds)
 
     if not seed_tracks and seed_mode not in ["history", "strict_collection"]:
         fallback = pl_cfg.get("seed_fallback_mode", "history")
         log_warning(f"⚠️ No valid seeds found! Falling back to: {fallback.title()}")
-        
+
         if fallback == "history":
             seed_tracks.extend(h_seeds)
         elif fallback == "genre":
-            # Default to "Rock" if no genre seeds provided
-            g_seeds = [str(g).strip() for g in pl_cfg.get("genre_seeds", []) if str(g).strip()]
             if not g_seeds: g_seeds = ["Rock"]
-            fallback_tracks = collect_genre_tracks(music, plex, g_seeds, excluded_keys, filter_criteria)
-            seed_tracks.extend(fallback_tracks)
+            # Reuse already-collected genre tracks if available, otherwise collect now
+            if g_tracks is None:
+                g_tracks = collect_genre_tracks(music, plex, g_seeds, excluded_keys, filter_criteria)
+            seed_tracks.extend(g_tracks)
 
     unique_seeds = []
     seen = set()
@@ -1522,8 +1488,18 @@ def main() -> int:
             seen.add(t.ratingKey)
             unique_seeds.append(t)
     seed_tracks = unique_seeds
-    
-    log_detail(f"Total Seed Tracks: {len(seed_tracks)}")
+
+    # Seed collection summary
+    n_from_keys = len([t for t in seed_tracks if str(t.ratingKey) in {str(k) for k in keys}]) if keys else 0
+    n_from_artists = sum(1 for t in seed_tracks if any(
+        getattr(t, "grandparentTitle", "") == a.title for a in seed_artists
+    )) if seed_artists else 0
+    n_from_history = len(h_seeds)
+    log_detail(
+        f"Seeds gathered — Total: {len(seed_tracks)} | "
+        f"From keys: {n_from_keys} | From artists: {n_from_artists} | "
+        f"History pool: {n_from_history} | Excluded (recent plays): {len(excluded_keys)}"
+    )
 
     # ------------------------------------------------------------------
     # Step 2: Expansion
@@ -1555,64 +1531,83 @@ def main() -> int:
 
     # Mode: Sonic History (Intersection) with Smart Backfill
     if seed_mode == "sonic_history":
-        log_detail(f"Running Sonic History Intersection (History: {len(h_seeds)} items)...")
-        sonic_pool = []
         sonic_limit = int(pl_cfg.get("sonic_similar_limit", 20))
-        
-        if seed_tracks:
-            try:
-                expanded = expand_via_sonic_albums(
-                    seed_tracks, plex, sonic_limit, excluded_keys, filter_criteria,
-                    exploit_weight=exploit_weight, 
-                    recency_bias=recency_bias
-                )
-                sonic_pool.extend(expanded)
-            except: pass
 
-        if seed_artists:
-            try:
-                expanded = expand_via_sonic_artists(
-                    seed_artists, plex, sonic_limit, excluded_keys, filter_criteria,
-                    exploit_weight=exploit_weight, 
-                    recency_bias=recency_bias
-                )
-                sonic_pool.extend(expanded)
-            except: pass
-            
-        history_key_set = {str(t.ratingKey) for t in h_seeds if t.ratingKey}
-        intersection = []
-        seen_rks = set()
+        # If no play history exists, fall back to standard sonic expansion
+        if not h_seeds:
+            log_warning("⚠️ Sonic History: No play history found. Falling back to sonic track expansion.")
+            if seed_tracks:
+                try:
+                    candidates.extend(expand_via_sonic_tracks(
+                        seed_tracks, plex, excluded_keys, filter_criteria,
+                        max_tracks=max_tracks,
+                        exploit_weight=exploit_weight,
+                        recency_bias=recency_bias
+                    ))
+                except Exception as e:
+                    log_warning(f"⚠️ Sonic History fallback expansion failed: {e}")
+        else:
+            log_detail(f"Running Sonic History Intersection (History: {len(h_seeds)} items)...")
+            sonic_pool = []
 
-        for t in sonic_pool:
-            rk = str(t.ratingKey) if t.ratingKey else None
-            if rk and rk in history_key_set and rk not in seen_rks:
-                intersection.append(t)
-                seen_rks.add(rk)
+            if seed_tracks:
+                try:
+                    expanded = expand_via_sonic_albums(
+                        seed_tracks, plex, sonic_limit, excluded_keys, filter_criteria,
+                        exploit_weight=exploit_weight,
+                        recency_bias=recency_bias,
+                        target_count=max_tracks
+                    )
+                    sonic_pool.extend(expanded)
+                except Exception as e:
+                    log_warning(f"⚠️ Sonic History album expansion failed: {e}")
 
-        for t in seed_tracks:
-            rk = str(t.ratingKey) if t.ratingKey else None
-            if rk and rk in history_key_set and rk not in seen_rks:
-                intersection.append(t)
-                seen_rks.add(rk)
-        
-        log_detail(f"Sonic Pool: {len(sonic_pool)} -> Intersection: {len(intersection)}")
-        candidates.extend(intersection)
+            if seed_artists:
+                try:
+                    expanded = expand_via_sonic_artists(
+                        seed_artists, plex, sonic_limit, excluded_keys, filter_criteria,
+                        exploit_weight=exploit_weight,
+                        recency_bias=recency_bias,
+                        target_count=max_tracks
+                    )
+                    sonic_pool.extend(expanded)
+                except Exception as e:
+                    log_warning(f"⚠️ Sonic History artist expansion failed: {e}")
 
-        needed = max_tracks - len(candidates)
-        if needed > 0:
-            log_detail(f"Short by {needed} tracks. Backfilling with 'Discovery' tracks...")
-            pool_copy = list(sonic_pool)
-            random.shuffle(pool_copy) # SHUFFLE FIX
-            
-            backfill = []
-            for t in pool_copy:
+            history_key_set = {str(t.ratingKey) for t in h_seeds if t.ratingKey}
+            intersection = []
+            seen_rks = set()
+
+            for t in sonic_pool:
                 rk = str(t.ratingKey) if t.ratingKey else None
-                if rk and rk not in seen_rks:
-                    backfill.append(t)
+                if rk and rk in history_key_set and rk not in seen_rks:
+                    intersection.append(t)
                     seen_rks.add(rk)
-                    if len(backfill) >= needed:
-                        break
-            candidates.extend(backfill)
+
+            for t in seed_tracks:
+                rk = str(t.ratingKey) if t.ratingKey else None
+                if rk and rk in history_key_set and rk not in seen_rks:
+                    intersection.append(t)
+                    seen_rks.add(rk)
+
+            log_detail(f"Sonic Pool: {len(sonic_pool)} -> Intersection: {len(intersection)}")
+            candidates.extend(intersection)
+
+            needed = max_tracks - len(candidates)
+            if needed > 0:
+                log_detail(f"Short by {needed} tracks. Backfilling with 'Discovery' tracks...")
+                pool_copy = list(sonic_pool)
+                random.shuffle(pool_copy)
+
+                backfill = []
+                for t in pool_copy:
+                    rk = str(t.ratingKey) if t.ratingKey else None
+                    if rk and rk not in seen_rks:
+                        backfill.append(t)
+                        seen_rks.add(rk)
+                        if len(backfill) >= needed:
+                            break
+                candidates.extend(backfill)
 
     # Mode: Track Sonic
     if seed_mode == "track_sonic" and seed_tracks:
@@ -1640,21 +1635,37 @@ def main() -> int:
         candidates.extend(expand_sonic_journey(seed_tracks, plex, target_count=max_tracks))
 
     # Standard Sonic Modes
-    elif "sonic" in seed_mode and seed_tracks:
+    elif "sonic" in seed_mode and seed_mode != "sonic_history" and seed_tracks:
         sonic_limit = int(pl_cfg.get("sonic_similar_limit", 20))
         
         if "album" in seed_mode or "combo" in seed_mode:
             candidates.extend(expand_via_sonic_albums(
                 seed_tracks, plex, sonic_limit, excluded_keys, filter_criteria,
-                exploit_weight=exploit_weight, 
-                recency_bias=recency_bias
+                exploit_weight=exploit_weight,
+                recency_bias=recency_bias,
+                target_count=max_tracks
             ))
             
         if "artist" in seed_mode or "combo" in seed_mode:
+            # If no named artists were provided, extract unique artists from seed_tracks
+            if not seed_artists and seed_tracks:
+                seen_ark = set()
+                for t in seed_tracks:
+                    ark = getattr(t, "grandparentRatingKey", None)
+                    if ark and ark not in seen_ark:
+                        try:
+                                artist_obj = plex.fetchItem(ark)
+                                seed_artists.append(artist_obj)
+                                seen_ark.add(ark)
+                        except: pass
+                if seed_artists:
+                    log_detail(f"Auto-extracted {len(seed_artists)} artists from seed tracks for sonic artist expansion.")
+
             candidates.extend(expand_via_sonic_artists(
                 seed_artists, plex, sonic_limit, excluded_keys, filter_criteria,
-                exploit_weight=exploit_weight, 
-                recency_bias=recency_bias
+                exploit_weight=exploit_weight,
+                recency_bias=recency_bias,
+                target_count=max_tracks
             ))
             
     # If no "new" music was found (or mode is strict), use the seeds themselves as candidates.
@@ -1676,6 +1687,7 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Step 4: Filter & Shape (Track-First Genre)
     # ------------------------------------------------------------------
+    log_detail(f"Expansion complete — {len(candidates)} candidates gathered")
     log_status(50, f"Filtering {len(candidates)} candidates...")
     
     seen_ids = set()
@@ -1690,6 +1702,16 @@ def main() -> int:
     
     seed_genre_set = {g.lower() for g in g_seeds}
     genre_strict = bool(pl_cfg.get("genre_strict", 0))
+
+    # If strict mode is on but no genres were specified, infer from seed tracks
+    if genre_strict and not seed_genre_set:
+        for t in seed_tracks:
+            seed_genre_set.update(get_track_genres_with_fallback(t))
+        if seed_genre_set:
+            log_detail(f"Genre Strict: No genres configured — inferred from seed tracks: {sorted(seed_genre_set)}")
+        else:
+            log_warning("⚠️ Genre Strict is enabled but no genres could be inferred from seeds. Strictness disabled.")
+            genre_strict = False
     allow_off_genre_fraction = float(pl_cfg.get("allow_off_genre_fraction", 0.2))
     off_limit = int(max_tracks * allow_off_genre_fraction)
     off_genre_count = 0
@@ -1726,31 +1748,41 @@ def main() -> int:
 
         valid_candidates.append(t)
 
+    # Phase 1 summary
+    log_detail(f"Phase 1 (Validation): {len(candidates)} candidates → {len(valid_candidates)} passed")
+    if rejects:
+        reject_parts = ", ".join(f"{k}: {v}" for k, v in sorted(rejects.items(), key=lambda x: -x[1]))
+        log_detail(f"  Rejected — {reject_parts}")
+
     # --- PHASE 2: RANKING (Skip for Journey) ---
     # Sonic Journey's order IS the logic. Do not scramble it with Smart Sort.
     if seed_mode != "sonic_journey":
         recency_bias = float(pl_cfg.get("recency_bias", 0.0))
-        
-        # Default to Popularity as base for ALL sortable modes (History, Genre, Strict, etc.)
-        use_pop = True
-        
+
+        # track_sonic preserves Plex's sonic similarity order as the quality signal.
+        # All other modes rank by popularity (viewCount + ratingCount).
+        use_pop = seed_mode != "track_sonic"
+
         valid_candidates = smart_sort_candidates(
-            valid_candidates, 
-            exploit_weight, 
+            valid_candidates,
+            exploit_weight,
             recency_bias=recency_bias,
             use_popularity=use_pop
         )
 
     # --- PHASE 3: SELECTION (Caps) ---
     final_selection = []
-    
+
     artist_counts = defaultdict(int)
     album_counts = defaultdict(int)
-    
+    p3_artist_cap = 0
+    p3_album_cap = 0
+    p3_genre_strict = 0
+
     for t in valid_candidates:
         if len(final_selection) >= max_tracks:
             break
-            
+
         try:
             artist_name = t.grandparentTitle or "Unknown"
             album_key = t.parentRatingKey or "Unknown"
@@ -1758,17 +1790,20 @@ def main() -> int:
 
         # Check Caps
         if max_tracks_per_artist > 0 and artist_counts[artist_name] >= max_tracks_per_artist:
+            p3_artist_cap += 1
             continue
         if max_tracks_per_album > 0 and album_counts[album_key] >= max_tracks_per_album:
+            p3_album_cap += 1
             continue
 
         # Check Genre Strictness
         if seed_genre_set:
             candidate_genres = get_track_genres_with_fallback(t)
             on_genre = bool(candidate_genres.intersection(seed_genre_set))
-            
+
             if genre_strict and not on_genre:
                 if off_genre_count >= off_limit:
+                    p3_genre_strict += 1
                     continue
                 else:
                     off_genre_count += 1
@@ -1778,6 +1813,17 @@ def main() -> int:
         artist_counts[artist_name] += 1
         album_counts[album_key] += 1
 
+    # Phase 3 summary
+    p3_parts = []
+    if p3_artist_cap:   p3_parts.append(f"artist cap: {p3_artist_cap}")
+    if p3_album_cap:    p3_parts.append(f"album cap: {p3_album_cap}")
+    if p3_genre_strict: p3_parts.append(f"genre strict: {p3_genre_strict}")
+    if off_genre_count: p3_parts.append(f"off-genre allowed: {off_genre_count}")
+    log_detail(
+        f"Phase 3 (Selection): {len(valid_candidates)} ranked → {len(final_selection)} selected"
+        + (f" | {', '.join(p3_parts)}" if p3_parts else "")
+    )
+
     # --- PHASE 4: SMOOTHING (Skip for Journey) ---
     # Journey is already smoothed (A -> B). Random anchor smoothing would break the chain.
     if seed_mode != "sonic_journey" and bool(pl_cfg.get("sonic_smoothing", False)):
@@ -1786,7 +1832,14 @@ def main() -> int:
     else:
         final_tracks = final_selection
 
-    log_detail(f"Final Playlist Size: {len(final_tracks)}")
+    # Final summary
+    unique_artists = len({getattr(t, "grandparentTitle", "?") for t in final_tracks})
+    unique_albums = len({getattr(t, "parentRatingKey", "?") for t in final_tracks})
+    log_detail(
+        f"━━ Summary ━━ Mode: {seed_mode} | Seeds: {len(seed_tracks)} | "
+        f"Candidates: {len(candidates)} → {len(valid_candidates)} valid → {len(final_tracks)} final | "
+        f"Artists: {unique_artists} | Albums: {unique_albums}"
+    )
     if not final_tracks:
         log("❌ ERROR: 0 tracks remaining after filters.")
         return 5
@@ -1794,14 +1847,14 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Step 5: Publish to Plex
     # ------------------------------------------------------------------
-    log_status(90, "Publishing playlist...")
-    
     cust_title = pl_cfg.get("custom_title")
     if cust_title:
         title = cust_title
     else:
         date_str = datetime.now().strftime("%y-%m-%d")
-        title = f"Playlist Creator • {seed_mode.title()} ({date_str})"
+        title = f"Playlist Creator • {seed_mode.replace('_', ' ').title()} ({date_str})"
+
+    log_status(90, f"Publishing playlist: \"{title}\"")
 
     desc = f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}. Mode: {seed_mode}. Tracks: {len(final_tracks)}."
 

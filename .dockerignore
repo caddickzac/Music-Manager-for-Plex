@@ -1,1 +1,32 @@
+# --- Secrets / local config ---
 config.txt
+.env
+.env.*
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+
+# --- Local data / exports (generated at runtime, not baked in) ---
+Exports/
+logs/
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+
+# --- Git ---
+.git/
+.gitignore
+
+# --- Dev files ---
+*.bat
+*.docx
+App Documentation.docx
