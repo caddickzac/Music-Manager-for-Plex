@@ -1013,10 +1013,14 @@ def smooth_playlist_gradient(tracks: List[Track], plex: PlexServer) -> List[Trac
         log_detail(f"Selected Start: '{best_start_track.title}' (Link Rank: {best_link_score})")
 
     # --- PHASE 2: CHAIN (1-step look-ahead greedy, lazy API calls) ---
+    ARTIST_COOLDOWN = 3  # don't repeat an artist within this many tracks
     while pool:
         current_track = playlist[-1]
         current_artist = current_track.grandparentTitle
         best_candidate = None
+
+        # Build the set of artists on cooldown (last N positions in playlist)
+        recent_artists = {t.grandparentTitle for t in playlist[-ARTIST_COOLDOWN:]}
 
         # Priority 1: Sonic match — pick the one with the best forward connectivity.
         # get_cached_neighbors triggers one API call for current_track if not yet cached.
@@ -1024,10 +1028,20 @@ def smooth_playlist_gradient(tracks: List[Track], plex: PlexServer) -> List[Trac
         sonic_matches = [
                 pool_index[nk]
                 for nk in get_cached_neighbors(current_track)
-                if nk in pool_index and pool_index[nk].grandparentTitle != current_artist
+                if nk in pool_index and pool_index[nk].grandparentTitle not in recent_artists
         ]
         if sonic_matches:
                 best_candidate = max(sonic_matches, key=forward_score)
+
+        # Priority 1b: Cooldown relaxed — if no candidates found, allow artists not just the current one
+        if not best_candidate:
+                sonic_matches_relaxed = [
+                        pool_index[nk]
+                        for nk in get_cached_neighbors(current_track)
+                        if nk in pool_index and pool_index[nk].grandparentTitle != current_artist
+                ]
+                if sonic_matches_relaxed:
+                        best_candidate = max(sonic_matches_relaxed, key=forward_score)
 
         # Priority 2: BPM match (different artist, within 8 BPM)
         if not best_candidate and getattr(current_track, 'bpm', None):
