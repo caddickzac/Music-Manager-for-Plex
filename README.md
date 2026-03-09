@@ -217,18 +217,7 @@ The Playlist Creator is an advanced music control room for creating playlists in
 
 Seed Strategy has different modes which are the primary strategy used to gather candidate tracks for a playlist.
 
-#### 7.1.1  Auto (infer from seeds/history)
-
-Brief description: Intelligently guesses the best strategy based on what inputs you provide.
-
-How it works:
-* If Genre Seeds are present -> Defaults to Genre Mode.
-* If Seed Tracks are present -> Defaults to Sonic Tracks Mix.
-* If Seed Artists are present -> Defaults to Sonic Artist Mix.
-* If no seeds are provided -> Defaults to History + Seeds (pure history).
-
-
-#### 7.1.2  Deep Dive (Seed Albums)
+#### 7.1.1  Deep Dive (Seed Albums)
 
 Brief description: Picks full albums related to your seed tracks (great for rediscovering deep cuts).
 
@@ -251,7 +240,7 @@ Inputs it ignores:
 * Sonic Journey: Ignored.
 
 
-#### 7.1.3  Genre seeds
+#### 7.1.2  Genre seeds
 
 Brief description: Pulls top tracks from specific genres (e.g., "Shoegaze").
 
@@ -271,7 +260,7 @@ Inputs It Ignores:
 * Seed Tracks/Artists: Ignored (focuses purely on the Genre list).
 
 
-#### 7.1.4  History + Seeds (Union)
+#### 7.1.3  History + Seeds (Union)
 
 Brief description: Combines tracks from your history (favorites) with any specific manual seeds you enter.
 
@@ -288,7 +277,7 @@ Inputs It Ignores:
 * Sonic Similarity: No sonic matching is performed; tracks are added raw.
 
 
-#### 7.1.5  Sonic Artist Mix
+#### 7.1.4  Sonic Artist Mix
 
 Brief description: Finds artists sonically similar to your seeds and picks their top tracks.
 
@@ -302,7 +291,7 @@ Inputs It Uses:
 * Sonically Similar per Seed: Determines how many related artists to find.
 
 
-#### 7.1.6  Sonic Album Mix
+#### 7.1.5  Sonic Album Mix
 
 Brief description: Finds full albums sonically similar to your seed albums.
 
@@ -316,7 +305,7 @@ Inputs It Uses:
 * Sonically Similar per Seed: Determines how many related albums to fetch.
 
 
-#### 7.1.7  Sonic Tracks Mix
+#### 7.1.6  Sonic Tracks Mix
 
 Brief description: Finds individual tracks that match the sonic profile of your seed tracks.
 
@@ -330,7 +319,7 @@ Inputs It Uses:
 * Sonically Similar per Seed: Controls match precision (Lower = Tighter match, Higher = More variety).
 
 
-### 7.1.8  Sonic Combo
+### 7.1.7  Sonic Combo
 
 Brief description: A blend of Artist, Album, and Track sonic matching for maximum variety.
 
@@ -343,7 +332,7 @@ Inputs It Uses:
 * All Seed Inputs: Artists, Tracks, and Albums are all utilized.
 
 
-#### 7.1.9  Sonic History (Intersection)
+#### 7.1.8  Sonic History (Intersection)
 
 Brief description: Finds tracks from your history that also match the sonic profile of your seeds (e.g., "Songs I own and love that sound like Tame Impala”).
 
@@ -359,7 +348,7 @@ Inputs It Uses:
 Best Used For: Rediscovering favorites with a specific vibe.
 
 
-#### 7.1.10  Sonic Journey (Linear Path)
+#### 7.1.9  Sonic Journey (Linear Path)
 
 Brief description: Builds a coherent chain where Song A leads musically to Song B, then to Song C.
 
@@ -375,7 +364,7 @@ Inputs It Uses:
 Note: Cannot be sorted by Date/Popularity as the order is fixed by the sonic path.
 
 
-#### 7.1.11  Strict Collection 
+#### 7.1.10  Strict Collection 
 
 Brief description: Takes an existing collection and re-sorts/filters it without adding outside tracks.
 How it works:
@@ -637,7 +626,7 @@ Note: These inputs behave differently based on seed strategy choices.
 List genre tagging for tracks and albums that you want included in your playlist (note: artist level genre tagging is ignored for this input). 
 
 How is this affected by Seed Strategy choice?
-* Works on: Genre Mode (and "Auto" if it guesses Genre).
+* Works on: Genre Mode.
 * Ignored by: Deep Dive, Sonic Modes, History, Strict Collection.
 * Does it affect the tracklist? Only if you are in Genre Mode.
 * Explanation: If you are in "Sonic Journey" mode and you type "Rock" here, the script ignores it. It does not force your Sonic Journey to be Rock songs. It is strictly used to start the playlist in Genre Mode.
