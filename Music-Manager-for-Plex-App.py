@@ -23,7 +23,7 @@ except ImportError:
 from Scripts import plex_galaxy, artist_recommender  # Import from the subfolder
 
 # --- Version Configuration ---
-CURRENT_VERSION = "v2.2.2"
+CURRENT_VERSION = "v2.2.3"
 REPO_OWNER = "caddickzac"
 REPO_NAME = "Music-Manager-for-Plex"
 
@@ -108,28 +108,44 @@ def expose_internal_files():
 
 def deploy_example_presets():
     """
-    Copies bundled preset JSONs from /app/Playlist_Presets/ (inside the Docker image)
-    to the Extras/Playlist Examples folder (accessible via network share).
-    Always overwrites — these are app-managed examples, not user files.
+    Copies bundled preset JSONs from /app/Bundled_Presets/ (baked into the image,
+    never overridden by volume mounts) to two destinations:
+      1. Extras/Playlist Examples/ — always overwrites (app-managed reference copy)
+      2. Playlist_Presets/         — only if the file doesn't exist yet (user edits stick)
     """
-    internal_presets_dir = "/app/Playlist_Presets"
+    internal_presets_dir = "/app/Bundled_Presets"
     if not os.path.isdir(internal_presets_dir):
         return
-    try:
-        os.makedirs(EXAMPLES_DIR, exist_ok=True)
-        os.chmod(EXAMPLES_DIR, 0o777)
-    except Exception:
-        return
+
+    # Ensure destinations exist
+    for d in [EXAMPLES_DIR, PRESETS_DIR]:
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.chmod(d, 0o777)
+        except Exception:
+            pass
+
     for fn in os.listdir(internal_presets_dir):
         if not fn.lower().endswith(".json"):
             continue
         src = os.path.join(internal_presets_dir, fn)
-        dst = os.path.join(EXAMPLES_DIR, fn)
+
+        # 1. Always overwrite in Extras/Playlist Examples/
         try:
+            dst = os.path.join(EXAMPLES_DIR, fn)
             shutil.copy(src, dst)
             os.chmod(dst, 0o777)
         except Exception as e:
-            print(f"Warning: could not deploy example preset '{fn}': {e}")
+            print(f"Warning: could not deploy example to Extras '{fn}': {e}")
+
+        # 2. Copy to user presets only if not already there (preserve customisations)
+        try:
+            dst_user = os.path.join(PRESETS_DIR, fn)
+            if not os.path.exists(dst_user):
+                shutil.copy(src, dst_user)
+                os.chmod(dst_user, 0o777)
+        except Exception as e:
+            print(f"Warning: could not seed user preset '{fn}': {e}")
 
 # Run setup logic before the UI loads
 expose_internal_files()

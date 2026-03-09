@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 3. Copy your specific project files
 COPY . .
 
+# 4. Bake example presets into a separate internal path so they survive the
+#    Playlist_Presets volume mount at runtime
+RUN cp -r /app/Playlist_Presets /app/Bundled_Presets
+
 # 4. Streamlit config
 EXPOSE 8501
 
