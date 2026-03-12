@@ -27,10 +27,13 @@ import warnings
 # Suppress the noise about "edit" vs "editSummary"
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# Make Cover_Art_Designs package (in parent dir of Scripts/) importable
+# Make Cover_Art_Designs package importable.
+# Works whether the script runs from /app/Scripts/ (canonical) or
+# /app/Extras/Scripts/ (the copy exposed via network share).
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _APP_ROOT not in sys.path:
-    sys.path.insert(0, _APP_ROOT)
+for _candidate in (_APP_ROOT, "/app"):
+    if _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
 
 try:
     from Cover_Art_Designs import DESIGNS as _COVER_DESIGNS, generate_cover_art as _gen_cover_art

@@ -23,7 +23,7 @@ except ImportError:
 from Scripts import plex_galaxy, artist_recommender  # Import from the subfolder
 
 # --- Version Configuration ---
-CURRENT_VERSION = "v2.3.0"
+CURRENT_VERSION = "v2.3.1"
 REPO_OWNER = "caddickzac"
 REPO_NAME = "Music-Manager-for-Plex"
 
