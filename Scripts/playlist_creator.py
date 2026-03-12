@@ -27,6 +27,17 @@ import warnings
 # Suppress the noise about "edit" vs "editSummary"
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+# Make Cover_Art_Designs package (in parent dir of Scripts/) importable
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
+
+try:
+    from Cover_Art_Designs import DESIGNS as _COVER_DESIGNS, generate_cover_art as _gen_cover_art
+    _HAS_COVER_ART = True
+except ImportError:
+    _HAS_COVER_ART = False
+
 # Try/Except to handle missing libraries on different machines
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -130,16 +141,46 @@ def create_playlist_thumbnail(title, output_path="thumb.png"):
 
     margin = 40
     wrapped_title = textwrap.fill(title, width=15)
-    draw.multiline_text((size - margin, margin), wrapped_title, 
-                        font=title_font, fill="white", 
-                        align="right", anchor="ra", spacing=10)
+    draw.multiline_text((margin, margin), wrapped_title,
+                        font=title_font, fill="white",
+                        align="left", anchor="la", spacing=10)
 
     current_date = datetime.now().strftime("%m/%d/%Y")
-    draw.text((margin, size - margin), current_date, 
-              font=date_font, fill="white", anchor="ld")
+    draw.text((size - margin, size - margin), current_date,
+              font=date_font, fill="white", anchor="rd")
 
     img.save(output_path)
     return output_path
+
+
+def _make_thumbnail(title: str, output_path: str, pl_cfg: dict) -> str:
+    """
+    Generate the playlist thumbnail.
+
+    If a cover art design is selected (anything other than "None") and the
+    Cover_Art_Designs package is available, render the design as a matplotlib
+    figure and write it to *output_path*.
+
+    Falls back to the plain black PIL image (create_playlist_thumbnail) when:
+      - design is "None"
+      - the Cover_Art_Designs package failed to import
+      - the design key is unrecognised
+    """
+    design_name = pl_cfg.get("cover_art_design", "None") or "None"
+    color    = pl_cfg.get("cover_art_color")    or "#FF0000"
+    bg_color = pl_cfg.get("cover_art_bg_color") or "#000000"
+
+    if _HAS_COVER_ART:
+        design_key = _COVER_DESIGNS.get(design_name, "none")
+        date_str   = datetime.now().strftime("%m/%d/%Y")
+        png_bytes  = _gen_cover_art(design_key, title, date_str,
+                                    color=color, bg_color=bg_color)
+        if png_bytes:
+            with open(output_path, "wb") as fh:
+                fh.write(png_bytes)
+            return output_path
+
+    return create_playlist_thumbnail(title, output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1288,9 @@ def convert_preset_to_payload(flat_cfg: dict) -> dict:
         },
         "playlist": {
             "custom_title": flat_cfg.get("pc_custom_title"),
+            "cover_art_design": flat_cfg.get("pc_coverart_select", "None"),
+            "cover_art_color": flat_cfg.get("pc_coverart_color_select", "#FF0000"),
+            "cover_art_bg_color": flat_cfg.get("pc_coverart_bg_color_select", "#000000"),
             "preset_name": flat_cfg.get("pc_preset_name"),
             "exclude_played_days": _int("pc_exclude_days", 3),
             "history_lookback_days": _int("pc_lookback_days", 30),
@@ -1885,7 +1929,7 @@ def main() -> int:
         playlist.edit(summary=desc)
 
         thumb_file = f"thumb_{playlist.ratingKey}.png"
-        create_playlist_thumbnail(title, thumb_file)
+        _make_thumbnail(title, thumb_file, pl_cfg)
         playlist.uploadPoster(filepath=thumb_file)
         if os.path.exists(thumb_file): os.remove(thumb_file)
         

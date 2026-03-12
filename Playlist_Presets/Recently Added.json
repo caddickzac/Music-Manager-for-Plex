@@ -23,7 +23,7 @@
   "pc_max_duration": 0,
   "pc_max_artist": 4,
   "pc_max_album": 2,
-  "pc_recency_bias": 0.0,
+  "pc_recency_bias": 0.7,
   "pc_hist_min_rating": 0,
   "pc_hist_max_play_count": -1,
   "pc_seed_mode_label": "Strict Collection",
@@ -37,5 +37,8 @@
   "pc_allow_off_genre": 0.2,
   "pc_exclude_genres": "Gospel, Christmas",
   "pc_include_collections": "",
-  "pc_exclude_collections": ""
+  "pc_exclude_collections": "",
+  "pc_coverart_select": "Triangle Tiles A",
+  "pc_coverart_color_select": "#FF0000",
+  "pc_coverart_bg_color_select": "#ffffff"
 }
