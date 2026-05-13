@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import sys
 import io
 import re
 import json
@@ -51,12 +52,12 @@ PRESETS_DIR = os.path.join(APP_DIR, "Playlist_Presets")
 
 # 1. Define internal source files and external destination
 INTERNAL_FILES = {
-    "/app/Scripts/playlist_creator.py": "Scripts",
-    "/app/Scripts/export_library_metadata.py": "Scripts",
-    "/app/App Documentation.pdf": None,
-    "/app/Music_Manager_Track_Level_Data_Dictionary.csv": None
+    os.path.join(SCRIPTS_DIR, "playlist_creator.py"): "Scripts",
+    os.path.join(SCRIPTS_DIR, "export_library_metadata.py"): "Scripts",
+    os.path.join(APP_DIR, "App Documentation.pdf"): None,
+    os.path.join(APP_DIR, "Music_Manager_Track_Level_Data_Dictionary.csv"): None
 }
-EXTERNAL_EXTRAS_PATH = "/app/Extras"
+EXTERNAL_EXTRAS_PATH = os.path.join(APP_DIR, "Extras")
 EXAMPLES_DIR = os.path.join(EXTERNAL_EXTRAS_PATH, "Playlist Examples")
 
 # 2. Define folders that need recursive permission syncing
@@ -113,7 +114,7 @@ def deploy_example_presets():
       1. Extras/Playlist Examples/ — always overwrites (app-managed reference copy)
       2. Playlist_Presets/         — only if the file doesn't exist yet (user edits stick)
     """
-    internal_presets_dir = "/app/Bundled_Presets"
+    internal_presets_dir = os.path.join(APP_DIR, "Bundled_Presets")
     if not os.path.isdir(internal_presets_dir):
         return
 
@@ -306,7 +307,7 @@ def discover_scripts(include_exports: bool = True, _sig: str = "") -> Dict[str, 
             suffix += 1
         reg[key] = ScriptInfo(
             action=key,
-            cmd=["python", py],
+            cmd=[sys.executable, py],
             schema=schema,
             path=py,
             expected_values=expected_values,
@@ -352,7 +353,7 @@ def export_library_metadata_via_script(cfg: AppConfig, limit: int = 0, include_p
     st.write("Running external export script…")
     try:
         proc = subprocess.Popen(
-            ["python", script_path],
+            [sys.executable, script_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -2259,7 +2260,7 @@ def ui_playlist_creator_tab(cfg: AppConfig):
 
     try:
         proc = subprocess.Popen(
-            ["python", PLAYLIST_CREATOR_SCRIPT],
+            [sys.executable, PLAYLIST_CREATOR_SCRIPT],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
