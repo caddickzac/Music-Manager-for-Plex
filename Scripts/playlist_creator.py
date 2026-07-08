@@ -1351,10 +1351,8 @@ def main() -> int:
 
     if args.preset:
         preset_name = args.preset.replace(".json", "").strip()
-        if os.path.exists("/app/Playlist_Presets"):
-            base_folder = "/app/Playlist_Presets"
-        else:
-            base_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Playlist_Presets")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        base_folder = os.path.join(os.path.dirname(script_dir), "Playlist_Presets")
         
         preset_path = os.path.join(base_folder, f"{preset_name}.json")
         log(f"Loading preset from: {preset_path}")
